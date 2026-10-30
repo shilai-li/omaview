@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "shilai_li.omaview",
+  "name": "Omaview",
+  "version": "1.0.0",
+  "author": "Shilai Li",
+  "license": "MIT",
+  "description": "A window overview for Hyprland: every window spread out, workspaces along the top, drag a window to move it.",
+  "kinds": ["overlay"],
+  "keepLoaded": true,
+  "entryPoints": { "overlay": "Omaview.qml" }
+}
