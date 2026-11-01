@@ -720,7 +720,9 @@ Item {
   // and Hyprland moves no focus while a layer holds the keyboard: so the
   // overview lets go of it, focuses the selected window (keeping the
   // pointer), opens the terminal from it, in its folder, as Omarchy's own
-  // binding does, and takes the keyboard back once the window is there.
+  // binding does, and takes the keyboard back once the window is there. With
+  // no window selected (an empty workspace) there is nothing to open it from:
+  // it goes on the workspace on show, on the monitor that has the keyboard.
   signal terminalSelectedRequested()
 
   GlobalShortcut {
@@ -749,11 +751,15 @@ Item {
     id: terminalFocus
     interval: 34
     onTriggered: {
+      if (!root.opened) return root.takeKeyboardBack()
       var address = root.addressOf(root.terminalFor)
-      if (!address || !root.opened) return root.takeKeyboardBack()
-      Hyprland.dispatch("function() local c = hl.get_cursor_pos() "
-        + "hl.dispatch(hl.dsp.focus({ window = 'address:" + address + "' })) "
-        + "if c then hl.dispatch(hl.dsp.cursor.move({ x = math.floor(c.x), y = math.floor(c.y) })) end end")
+      if (address) {
+        Hyprland.dispatch("function() local c = hl.get_cursor_pos() "
+          + "hl.dispatch(hl.dsp.focus({ window = 'address:" + address + "' })) "
+          + "if c then hl.dispatch(hl.dsp.cursor.move({ x = math.floor(c.x), y = math.floor(c.y) })) end end")
+      } else {
+        root.focusMonitorNamed(root.focusMonitor)
+      }
       if (root.terminalCommand) Util.execArgv(root.terminalCommand)
       root.terminalCommand = null
     }
@@ -762,7 +768,7 @@ Item {
   // The new window is up: the keyboard back to the overview.
   Connections {
     target: Hyprland
-    enabled: !!root.terminalFor
+    enabled: terminalGiveUp.running
     function onRawEvent(event) {
       if (event && String(event.name) === "openwindow") Qt.callLater(root.takeKeyboardBack)
     }

@@ -196,8 +196,9 @@ PanelWindow {
     }
     function onStopPasses(refocus) { view.endPass(refocus) }
     function onTerminalSelectedRequested() {
-      if (!view.takesKeyboard || view.cursorIndex < 0) return
-      var chosen = view.windows[view.cursorIndex]
+      if (!view.takesKeyboard) return
+      // An empty workspace has nothing selected: the terminal just opens on it.
+      var chosen = view.cursorIndex >= 0 ? view.windows[view.cursorIndex] : null
       // The selection follows focus from here: the chosen window, then the
       // new terminal as it opens and takes focus.
       view.cursor = -1

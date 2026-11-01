@@ -43,7 +43,8 @@ omarchy plugin enable shilai_li.omaview
 Tap **Super** on its own to open or close the overview (Super with any other
 key acts as before), or swipe up with four fingers. While the overview is
 open, Super+Q/W, Super+Alt+F and Super+Enter act on the selected window, and
-Alt+Tab moves the selection.
+Alt+Tab moves the selection. On an empty workspace, Super+Enter opens a terminal
+there.
 
 To change a shortcut, edit the plugin's `hypr/omaview.lua`; the copy in
 `~/.config/hypr` is replaced at each start.
