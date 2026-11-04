@@ -641,10 +641,22 @@ PanelWindow {
   // Faded as one flat layer. Opacity alone reaches each child separately, so
   // the dark layers meant to stay hidden under the sharp wallpaper would show
   // through as it fades, and the whole screen would dip darker on the way.
+  //
+  // Sized by the screen, never by the surface: each time the surface maps it
+  // passes through 0×0 and a pixel ratio of 1. Followed, that dropped the
+  // decoded wallpapers (BackgroundMedia unloads at a decode size of 0) and
+  // every layer's texture, so each opening decoded the 4K wallpaper again
+  // (from Qt's image cache if recent, else from disk) and redid every blur in
+  // the middle of the opening motion.
   Item {
-    anchors.fill: parent
+    id: backdrop
+    readonly property real scale: view.monitor && view.monitor.scale > 0 ? view.monitor.scale : 1
+    readonly property size pixels: Qt.size(Math.ceil(width * scale), Math.ceil(height * scale))
+    width: view.modelData ? view.modelData.width : 0
+    height: view.modelData ? view.modelData.height : 0
     opacity: view.backdropFade
     layer.enabled: true
+    layer.textureSize: backdrop.pixels
 
     // Only with no wallpaper to show. One still decoding on the first opening
     // leaves the desktop in view, rather than a dark screen for a moment.
@@ -661,6 +673,7 @@ PanelWindow {
       id: blurredWallpaperItem
       anchors.fill: parent
       layer.enabled: true
+      layer.textureSize: backdrop.pixels
       // Never without the sharp wallpaper over it, or the frost fills the
       // screen.
       visible: wallpaper.ready && sharpWallpaper.ready
@@ -695,7 +708,7 @@ PanelWindow {
       id: windowGlassItem
       anchors.fill: parent
       layer.enabled: true
-      layer.textureSize: Qt.size(width, height)
+      layer.textureSize: Qt.size(backdrop.width, backdrop.height)
       visible: sharpWallpaper.ready
 
       MultiEffect {
@@ -726,8 +739,7 @@ PanelWindow {
       path: view.overview.wallpaperPath
       cached: true
       constrainDecode: true
-      readonly property real decodeScale: view.monitor && view.monitor.scale > 0 ? view.monitor.scale : view.devicePixelRatio
-      decodeSize: Qt.size(Math.ceil(width * decodeScale), Math.ceil(height * decodeScale))
+      decodeSize: backdrop.pixels
     }
   }
 
