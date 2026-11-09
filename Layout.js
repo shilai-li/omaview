@@ -188,6 +188,26 @@ function clamp01(t) {
   return t < 0 ? 0 : t > 1 ? 1 : t
 }
 
+// A CSS-style cubic Bézier easing at progress t, from its two control points
+// in Qt's form ([x1, y1, x2, y2, 1, 1], as Style.easeOut is): x is solved for
+// t by bisection, which is exact enough for a frame and never diverges.
+function ease(curve, t) {
+  t = clamp01(t)
+  if (t === 0 || t === 1) return t
+  var x1 = curve[0], y1 = curve[1], x2 = curve[2], y2 = curve[3]
+  function at(a, b, s) {
+    var u = 1 - s
+    return 3 * u * u * s * a + 3 * u * s * s * b + s * s * s
+  }
+  var lo = 0, hi = 1, s = t
+  for (var i = 0; i < 30; i++) {
+    s = (lo + hi) / 2
+    if (at(x1, x2, s) < t) lo = s
+    else hi = s
+  }
+  return at(y1, y2, (lo + hi) / 2)
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     FALLBACK_W: FALLBACK_W,
@@ -199,6 +219,7 @@ if (typeof module !== "undefined") {
     rectAt: rectAt,
     clampInto: clampInto,
     lerp: lerp,
-    clamp01: clamp01
+    clamp01: clamp01,
+    ease: ease
   }
 }

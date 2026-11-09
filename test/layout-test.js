@@ -157,6 +157,26 @@ check("wallpaper pieces stay inside the screen", () => {
   eq(L.clampInto({ x: 10, y: 10, w: 3000, h: 2000 }, 1536, 960), { x: 0, y: 0, w: 1536, h: 960 }, "bigger than the screen")
 })
 
+check("easing follows Qt's cubic Bézier", () => {
+  const easeOut = [0.23, 1.0, 0.32, 1.0, 1.0, 1.0]
+  eq(L.ease(easeOut, 0), 0)
+  eq(L.ease(easeOut, 1), 1)
+  eq(L.ease(easeOut, -1), 0, "clamped below")
+  eq(L.ease(easeOut, 2), 1, "clamped above")
+  // Values Qt's own NumberAnimation gave with this curve over 220 ms, read
+  // at 6, 12 and 24 ms.
+  ok(Math.abs(L.ease(easeOut, 6 / 220) - 0.117) < 0.003, "6 ms in")
+  ok(Math.abs(L.ease(easeOut, 12 / 220) - 0.228) < 0.003, "12 ms in")
+  ok(Math.abs(L.ease(easeOut, 24 / 220) - 0.429) < 0.003, "24 ms in")
+  ok(Math.abs(L.ease([0, 0, 1, 1, 1, 1], 0.37) - 0.37) < 1e-6, "a straight line is linear")
+  let last = 0
+  for (let i = 1; i <= 100; i++) {
+    const v = L.ease(easeOut, i / 100)
+    ok(v >= last, "never goes back at " + i)
+    last = v
+  }
+})
+
 if (failures.length) {
   console.log(failures.map((f) => "FAIL " + f).join("\n"))
   console.log(passed + " passed, " + failures.length + " failed")

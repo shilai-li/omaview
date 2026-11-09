@@ -29,7 +29,12 @@ Non-negotiables:
 ## Layout of the code
 
 - `Omaview.qml` — lifecycle (one `reveal` clock, 0 = over the real windows,
-  1 = spread), theme tokens, every `Hyprland.dispatch`.
+  1 = spread), theme tokens, every `Hyprland.dispatch`. The clock moves on
+  the frames the focused monitor's surface shows (`frameShown`), at most a
+  refresh and a quarter per frame, not on Qt's animation clock: each opening
+  maps a new surface, Hyprland misses a refresh on its first frames, and a
+  clock that caught up jumped a third of the way in one frame. Measure with a
+  `frameSwapped` log or a `gpu-screen-recorder` capture at the display's rate.
 - `Overview.qml` — one `PanelWindow` per screen: blurred-wallpaper backdrop
   (decoded at quarter size, blurred once into a layer, only its opacity
   animates), glass strip, drop targets, keys, and the photo pass: once fully

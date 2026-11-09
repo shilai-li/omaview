@@ -51,6 +51,13 @@ PanelWindow {
   // Let go once a window is chosen, so Hyprland will move focus to it.
   WlrLayershell.keyboardFocus: view.takesKeyboard && !view.overview.keyboardReleased ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
 
+  // Each frame this surface shows moves the reveal clock on (Omaview.qml
+  // `frameShown`); one surface is enough, the focused monitor's.
+  Connections {
+    target: view.takesKeyboard ? keyCatcher.Window.window : null
+    function onFrameSwapped() { view.overview.frameShown() }
+  }
+
   // Opening and a gliding close move the thumbnails between their windows and
   // their slots; a fading close leaves them where they are.
   readonly property real travel: view.overview.opened || view.overview.exitMode === "glide" ? view.overview.reveal : 1

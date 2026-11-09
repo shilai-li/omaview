@@ -4,6 +4,7 @@ import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
+import "Layout.js" as Layout
 
 // The overview: a fullscreen layer-shell surface on every output, each showing
 // its own monitor's windows spread out and its workspaces along the top. kind
@@ -91,9 +92,12 @@ Item {
   // gives the file manager), by address: [active, inactive, opaque]. Captures
   // leave it out, so WindowCapture blends it back. Neither Quickshell nor
   // `hyprctl clients` reports it, so it is asked for with `hyprctl getprop`,
-  // in one background process, for every window at each opening: Omarchy's
-  // transparency toggle changes it with no event to go by. Each answer
-  // replaces the last, so closed windows drop out.
+  // all windows in one batch, at each opening (Omarchy's transparency toggle
+  // changes it with no event to go by) and in the background after a window
+  // opens. Until then a window has no entry and shows opaque: asked only at
+  // the opening, with a process per value, the answer came some 50 ms into
+  // the motion, and a terminal it did not know yet glided in flat and dark
+  // until it did. Each answer replaces the last, so closed windows drop out.
   property var opacities: ({})
 
   function windowAlpha(toplevel) {
@@ -104,17 +108,23 @@ Item {
     return isFinite(v) && v > 0 && v <= 1 ? v : 1
   }
 
+  readonly property var opacityProps: ["opacity", "opacity_inactive", "opaque"]
+  property var opacityAsked: []
+
   function askOpacities() {
     if (opacityProc.running) return
-    var all = Hyprland.toplevels.values, list = []
+    var all = Hyprland.toplevels.values, list = [], requests = []
     for (var i = 0; i < all.length; i++) {
       var a = root.addressOf(all[i])
-      if (a) list.push(a)
+      if (!a) continue
+      list.push(a)
+      for (var p = 0; p < root.opacityProps.length; p++) requests.push("getprop address:" + a + " " + root.opacityProps[p])
     }
     if (list.length === 0) return
-    opacityProc.command = ["sh", "-c",
-      "for a in \"$@\"; do echo \"$a $(hyprctl getprop address:$a opacity) $(hyprctl getprop address:$a opacity_inactive) $(hyprctl getprop address:$a opaque)\"; done",
-      "sh"].concat(list)
+    root.opacityAsked = list
+    // One answer per request, blank lines between, "window not found" for a
+    // window that closed meanwhile.
+    opacityProc.command = ["hyprctl", "--batch", requests.join("; ")]
     opacityProc.running = true
   }
 
@@ -122,12 +132,16 @@ Item {
     id: opacityProc
     stdout: StdioCollector {
       onStreamFinished: {
+        var answers = String(this.text || "").split(/\n\s*\n/).map(function(a) { return a.trim() })
+          .filter(function(a) { return a !== "" })
+        var list = root.opacityAsked, n = root.opacityProps.length
+        // Out of step with the requests: keep what was known.
+        if (answers.length !== list.length * n) return
         var next = ({})
-        var lines = String(this.text || "").split("\n")
-        for (var i = 0; i < lines.length; i++) {
-          var f = lines[i].trim().split(/\s+/)
-          if (f.length < 4 || !/^0x[0-9a-f]+$/i.test(f[0])) continue
-          next[f[0]] = [Number(f[1]), Number(f[2]), f[3] === "true"]
+        for (var i = 0; i < list.length; i++) {
+          var f = answers.slice(i * n, i * n + n)
+          if (f[2] !== "true" && f[2] !== "false") continue
+          next[list[i]] = [Number(f[0]), Number(f[1]), f[2] === "true"]
         }
         root.opacities = next
       }
@@ -246,8 +260,15 @@ Item {
     root.pendingFocus = null
     root.exitMode = "glide"
     root.opened = true
-    root.mapped = true
+    // A fresh still of every window on screen, asked for while the captures
+    // are still idle (WindowCapture `snapshotTick`): the picture kept from
+    // before can be well out of date (a terminal that has scrolled since),
+    // and laid half see-through over its window it showed as doubled text.
+    // It lands within a frame or two, as the surfaces come up.
+    root.snapshotTick++
+    // The clock first, then the surfaces: their first frame starts it.
     root.animateTo(1, root.openMs)
+    root.mapped = true
     // Off the hot path: the wallpaper already decoded shows at once, and a
     // changed one swaps in when this answers. Opacities likewise.
     wallpaperResolve.running = true
@@ -275,16 +296,23 @@ Item {
   }
 
   function animateTo(value, ms) {
-    revealAnim.stop()
+    root.revealRunning = false
+    revealFallback.stop()
     if (ms <= 0) {
       root.reveal = value
       root.settle()
       return
     }
-    revealAnim.from = root.reveal
-    revealAnim.to = value
-    revealAnim.duration = ms
-    revealAnim.start()
+    root.revealFrom = root.reveal
+    root.revealTo = value
+    root.revealMs = ms
+    root.revealElapsed = 0
+    root.revealLast = 0
+    root.revealRunning = true
+    revealFallback.start()
+    // Already up (a close, or reopening mid-close): one step now, so the
+    // surface has something new to draw and the frames start coming.
+    if (root.mapped) root.frameShown()
   }
 
   function settle() {
@@ -367,8 +395,12 @@ Item {
     function onRawEvent(event) {
       var name = event ? String(event.name) : ""
       if (/^(activewindowv2|workspacev2|openwindow|movewindowv2|fullscreen)$/.test(name)) stillDelay.restart()
+      if (name === "openwindow") root.newWindows = true
     }
   }
+
+  // A window opened since the opacities were last asked for (askOpacities).
+  property bool newWindows: false
 
   // Past the window animations, then ask where everything is, then shoot.
   Timer {
@@ -383,7 +415,14 @@ Item {
   Timer {
     id: stillShoot
     interval: 80
-    onTriggered: if (!root.mapped) root.snapshotTick++
+    onTriggered: {
+      if (root.mapped) return
+      root.snapshotTick++
+      if (root.newWindows) {
+        root.newWindows = false
+        root.askOpacities()
+      }
+    }
   }
 
   // Hyprland animates layer surfaces in and out on its own, which would play
@@ -412,13 +451,64 @@ Item {
     }
   }
 
-  NumberAnimation {
-    id: revealAnim
-    target: root
-    property: "reveal"
-    easing.type: Easing.Bezier
-    easing.bezierCurve: Style.easeOut
-    onFinished: root.settle()
+  // The reveal clock, moved on by the frames the overview shows rather than
+  // by time alone. Each opening maps a new surface, and Hyprland misses a
+  // refresh or two on its first frames; a clock that catches up then jumped
+  // a third of the way in one frame, the stutter at the start. Here each
+  // frame shown (`frameShown`, from the surface on the focused monitor)
+  // moves the motion on by the time since the last one, but by at most a
+  // refresh and a quarter: a late frame holds a moment, and the motion ends
+  // that much later. Qt's own animation clock cannot do this: other surfaces of
+  // the shell keep it ticking while ours waits.
+  property real revealFrom: 0
+  property real revealTo: 0
+  property real revealMs: 1
+  property real revealElapsed: 0
+  property bool revealRunning: false
+  property real revealLast: 0
+  readonly property real refreshMs: {
+    var monitor = Hyprland.focusedMonitor
+    var rate = monitor && monitor.lastIpcObject ? Number(monitor.lastIpcObject.refreshRate) : 0
+    return isFinite(rate) && rate >= 24 ? 1000 / rate : 1000 / 60
+  }
+
+  function frameShown() {
+    if (!root.revealRunning) return
+    var now = Date.now()
+    // The first frame moves on by one refresh: it has nothing to measure
+    // from, and a frame that changes nothing would ask for no next one.
+    var step = root.revealLast > 0 ? now - root.revealLast : root.refreshMs
+    root.revealLast = now
+    root.advanceReveal(Math.min(Math.max(0, step), root.refreshMs * 1.25))
+  }
+
+  function advanceReveal(ms) {
+    root.revealElapsed = Math.min(root.revealMs, root.revealElapsed + ms)
+    var t = root.revealElapsed / root.revealMs
+    if (t < 1) {
+      root.reveal = Layout.lerp(root.revealFrom, root.revealTo, Layout.ease(Style.easeOut, t))
+      return
+    }
+    // Exactly the end: `reveal >= 1` is what "fully open" means elsewhere.
+    root.revealRunning = false
+    revealFallback.stop()
+    root.reveal = root.revealTo
+    root.settle()
+  }
+
+  // No frames coming at all (no surface on the focused monitor): the wall
+  // clock alone, so the motion still ends.
+  Timer {
+    id: revealFallback
+    interval: 100
+    repeat: true
+    onTriggered: {
+      var now = Date.now()
+      if (now - root.revealLast < revealFallback.interval) return
+      var step = root.revealLast > 0 ? now - root.revealLast : revealFallback.interval
+      root.revealLast = now
+      root.advanceReveal(step)
+    }
   }
 
   // ----------------------------------------------------------- Hyprland
