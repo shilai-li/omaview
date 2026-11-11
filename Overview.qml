@@ -39,7 +39,11 @@ PanelWindow {
   // changes reach the thumbnails first.
   property var settledWorkspace: null
   function switchingWorkspace() { return view.workspace !== view.settledWorkspace }
-  onWorkspaceChanged: Qt.callLater(function() { view.settledWorkspace = view.workspace })
+  onWorkspaceChanged: {
+    // Its windows now, before the switch counts as over.
+    view.relayout()
+    Qt.callLater(function() { view.settledWorkspace = view.workspace })
+  }
 
   screen: view.modelData
   visible: view.overview.mapped
@@ -78,6 +82,9 @@ PanelWindow {
   // for thumbnails to show behind their window: the glass a capture of the
   // window alone leaves out.
   readonly property Item windowGlass: windowGlassItem
+  // Device pixels per logical pixel, by the monitor's scale (the surface's own
+  // passes through 1 each time it maps).
+  readonly property real pixelRatio: backdrop.scale
 
   // The part of that wallpaper behind a rect on this screen. The wallpaper
   // ends at the screen's edges, so a rect hanging over one, or off screen,
@@ -97,6 +104,15 @@ PanelWindow {
       var h = view.held[view.overview.addressOf(toplevel)]
       if (h) return h
     }
+    // A workspace left mid-pass is still scrolled the pass's way in
+    // Hyprland until the user comes back to it (awayHeld): its tile shows it
+    // as it was.
+    var ws = toplevel ? toplevel.workspace : null
+    var away = ws ? view.awayHeld[ws.id] : null
+    if (away) {
+      var a = away[view.overview.addressOf(toplevel)]
+      if (a) return a
+    }
     var ipc = (toplevel && toplevel.lastIpcObject) || {}
     var at = ipc.at || [0, 0]
     var size = ipc.size || [0, 0]
@@ -105,21 +121,68 @@ PanelWindow {
     return { x: at[0] - ox, y: at[1] - oy, w: size[0], h: size[1] }
   }
 
-  // The active workspace's windows. Hidden ones are the back tabs of a
-  // group, which Hyprland draws as one window.
-  readonly property var windows: {
+  // The active workspace's windows (hidden ones are the back tabs of a
+  // group, which Hyprland draws as one window), where they really are, their
+  // slots in the spread, and which has focus: worked out together, once per
+  // turn of the event loop (relayout). Hyprland's answer to a refresh lands
+  // as one change per window; as bindings, the whole spread was worked out
+  // again, and every thumbnail placed again, for each one of them, which
+  // grows with the square of the windows open.
+  property var layout: ({ windows: [], rects: [], slots: [], focused: 0, key: "" })
+  readonly property var windows: view.layout.windows
+  readonly property var realRects: view.layout.rects
+  readonly property var slots: view.layout.slots
+  readonly property int focusedIndex: view.layout.focused
+
+  // Everything the layout is worked out from; any change asks for one
+  // relayout, however many changes come at once.
+  readonly property int layoutInputs: {
+    var all = Hyprland.toplevels.values
+    for (var i = 0; i < all.length; i++) {
+      all[i].workspace
+      all[i].lastIpcObject
+    }
+    view.workspace
+    view.held
+    view.spreadArea
+    view.monitor && view.monitor.x
+    view.monitor && view.monitor.y
+    Qt.callLater(view.relayout)
+    return all.length
+  }
+
+  function relayout() {
+    view.overview.windowsReported()
     var out = []
     var ws = view.workspace
-    if (!ws) return out
-    var all = Hyprland.toplevels.values
+    var all = ws ? Hyprland.toplevels.values : []
     for (var i = 0; i < all.length; i++) {
       var ipc = all[i].lastIpcObject || {}
       if (all[i].workspace !== ws || ipc.hidden === true) continue
       out.push(all[i])
     }
-    return out
+    var rects = out.map(function(t) { return view.realRect(t) })
+    var best = -1, rank = Infinity
+    for (var j = 0; j < out.length; j++) {
+      var n = Number((out[j].lastIpcObject || {}).focusHistoryID)
+      if (isFinite(n) && n < rank) { rank = n; best = j }
+    }
+    var focused = best >= 0 ? best : 0
+    var area = { x: view.spreadArea.x, y: view.spreadArea.y, w: view.spreadArea.width, h: view.spreadArea.height }
+    var key = JSON.stringify([rects, area, view.gap, view.labelHeight])
+    var old = view.layout
+    var same = out.length === old.windows.length && key === old.key
+    for (var k = 0; same && k < out.length; k++) same = out[k] === old.windows[k]
+    // Nothing moved: keep the old one, so nothing downstream works again.
+    if (same && focused === old.focused) return
+    view.layout = {
+      windows: same ? old.windows : out,
+      rects: same ? old.rects : rects,
+      slots: same ? old.slots : Layout.spread(rects, area, { gap: view.gap, labelHeight: view.labelHeight }),
+      focused: focused,
+      key: key
+    }
   }
-  readonly property var realRects: view.windows.map(function(t) { return view.realRect(t) })
 
   readonly property int outer: Style.space(56)
   readonly property int gap: Style.space(40)
@@ -127,23 +190,12 @@ PanelWindow {
   readonly property int labelHeight: view.labelGap + Math.ceil(Style.font.subtitle * 1.4)
   readonly property rect spreadArea: Qt.rect(view.outer, strip.height + view.outer,
     view.width - view.outer * 2, view.height - strip.height - view.outer * 2)
-  readonly property var slots: Layout.spread(view.realRects,
-    { x: view.spreadArea.x, y: view.spreadArea.y, w: view.spreadArea.width, h: view.spreadArea.height },
-    { gap: view.gap, labelHeight: view.labelHeight })
 
   // The keyboard cursor, which hovering also moves: an index into `windows`.
   // -1 until the user moves it: then it follows the focused window, by
   // Hyprland's focus history (Quickshell's active window can lag, as just
   // after a restart), which also lands after opening.
   property int cursor: -1
-  readonly property int focusedIndex: {
-    var best = -1, rank = Infinity
-    for (var i = 0; i < view.windows.length; i++) {
-      var n = Number((view.windows[i].lastIpcObject || {}).focusHistoryID)
-      if (isFinite(n) && n < rank) { rank = n; best = i }
-    }
-    return best >= 0 ? best : 0
-  }
   readonly property int cursorIndex: view.windows.length === 0 ? -1
     : view.cursor < 0 ? view.focusedIndex
     : Math.max(0, Math.min(view.cursor, view.windows.length - 1))
@@ -184,6 +236,8 @@ PanelWindow {
 
   Connections {
     target: view.overview
+    // The surfaces come up: the layout as it is now, before the first frame.
+    function onMappedChanged() { if (view.overview.mapped) view.relayout() }
     function onOpenedChanged() {
       if (!view.overview.opened) {
         view.endPass(true)
@@ -457,6 +511,14 @@ PanelWindow {
     var check = Object.assign({}, view.restoreCheck)
     check[id] = true
     view.restoreCheck = check
+    // Gone elsewhere: the scroll back waits for the return, so keep where
+    // the windows were for the tile until then.
+    var active = view.monitor ? view.monitor.activeWorkspace : null
+    if (view.held && (!active || active.id !== id)) {
+      var away = Object.assign({}, view.awayHeld)
+      away[id] = view.held
+      view.awayHeld = away
+    }
     holdAsk.restart()
   }
 
@@ -494,12 +556,48 @@ PanelWindow {
   // before the overview opened: scroll, and focus if a plain close would
   // have restored it. Nothing moves if Hyprland has no way back kept.
   property var restoreCheck: ({})
+  // By workspace id: where its windows were before a pass that ended while
+  // the user was elsewhere, by address, until they return (realRect). Its
+  // tile also takes no new pictures meanwhile: what Hyprland would capture is
+  // the pass's scroll, with the windows the tile shows off screen.
+  property var awayHeld: ({})
+
+  // Back on it: once the way back has been taken, ask where the windows
+  // are, and only then let go, so nothing shows the pass's scroll meanwhile.
+  property var awayReturned: []
+
+  function forgetAway(id) {
+    if (!view.awayHeld[id]) return
+    view.awayReturned = view.awayReturned.concat([id])
+    awayAsk.restart()
+  }
+
+  Timer {
+    id: awayAsk
+    interval: 120
+    onTriggered: {
+      Hyprland.refreshToplevels()
+      awayLet.restart()
+    }
+  }
+
+  Timer {
+    id: awayLet
+    interval: 150
+    onTriggered: {
+      var away = Object.assign({}, view.awayHeld)
+      for (var i = 0; i < view.awayReturned.length; i++) delete away[view.awayReturned[i]]
+      view.awayReturned = []
+      view.awayHeld = away
+    }
+  }
 
   Connections {
     target: Hyprland
     function onRawEvent(event) {
       if (!event || String(event.name) !== "workspacev2") return
       var id = parseInt(String(event.data || "").split(",")[0], 10)
+      view.forgetAway(id)
       if (!view.restoreCheck[id]) return
       var check = Object.assign({}, view.restoreCheck)
       delete check[id]
@@ -644,7 +742,7 @@ PanelWindow {
   // The desktop sinks away: the wallpaper, sharp and just as the desktop
   // shows it, fades in over the real screen while the thumbnails
   // lift off it, and fades out as they land. Only the workspace strip is
-  // frosted (stripGlass).
+  // frosted (the strip's glass).
   // Faded as one flat layer. Opacity alone reaches each child separately, so
   // the dark layers meant to stay hidden under the sharp wallpaper would show
   // through as it fades, and the whole screen would dip darker on the way.
@@ -797,12 +895,21 @@ PanelWindow {
     color: "transparent"
 
     // Frosted glass: the blurred wallpaper behind the strip, under its tint;
-    // the rest of the background stays sharp.
-    ShaderEffectSource {
-      id: stripGlass
+    // the rest of the background stays sharp. The blurred layer itself,
+    // drawn whole where it lies on screen and cut to the strip: a copy of
+    // the piece behind the strip was made again on every frame it dropped in.
+    Item {
       anchors.fill: parent
-      sourceItem: blurredWallpaperItem
-      sourceRect: Qt.rect(strip.x, strip.y, strip.width, strip.height)
+      clip: true
+      visible: blurredWallpaperItem.visible
+
+      ShaderEffect {
+        x: -strip.x
+        y: -strip.y
+        width: backdrop.width
+        height: backdrop.height
+        property var source: blurredWallpaperItem
+      }
     }
 
     Rectangle {
@@ -882,9 +989,13 @@ PanelWindow {
                   readonly property var real: view.realRect(mini.modelData)
                   readonly property bool shown: !((mini.modelData.lastIpcObject || {}).hidden === true)
                   // The workspace on show mirrors the spread's pictures
-                  // (WindowCapture.mirrorOf).
-                  readonly property bool mirrored: tileItem.current
-                  visible: mini.shown && mini.real.w > 0
+                  // (WindowCapture.mirrorOf), and so does one left mid-pass
+                  // (awayHeld): those windows are off screen now, Hyprland
+                  // will not capture them, and the spread's last pictures of
+                  // them (kept, Thumbnail.qml) match where the tile has them.
+                  readonly property bool mirrored: tileItem.current || !!view.awayHeld[tileItem.workspace.id]
+                  // No size, no capture (see Thumbnail.qml).
+                  visible: mini.shown && mini.real.w > 0 && mini.real.h > 0
                   x: mini.real.x * view.tileScale
                   y: mini.real.y * view.tileScale
                   width: mini.real.w * view.tileScale
@@ -907,18 +1018,23 @@ PanelWindow {
                     stayLive: false
                     glass: view.overview.isTerminal(mini.modelData)
                     // Glass over the strip, from what is right behind the
-                    // tile, at its own scale. A tile growing to the whole
-                    // screen (zoomInto) lands on the real windows' glass.
+                    // tile, at its own scale, with the strip where it rests:
+                    // following it as it drops in redrew every tile on every
+                    // frame, for a shift no one sees under that much blur.
+                    // A tile growing to the whole screen (zoomInto) lands on
+                    // the real windows' glass.
                     backdrop: view.zooming ? view.windowGlass : blurredWallpaperItem
                     backdropRect: view.wallpaperBehind(view.zooming ? mini.real
-                      : { x: stripRow.x + tileItem.x + mini.x, y: strip.y + stripRow.y + tileItem.y + mini.y, w: mini.width, h: mini.height })
+                      : { x: stripRow.x + tileItem.x + mini.x, y: stripRow.y + tileItem.y + mini.y, w: mini.width, h: mini.height })
+                    pixelRatio: view.pixelRatio
                     glassBackground: view.overview.background
                     glassAlpha: view.overview.terminalAlpha
                     windowAlpha: view.overview.windowAlpha(mini.modelData)
                     // Hyprland captures a window on any workspace, as long as
                     // where it sits overlaps the monitor.
                     snapshotTick: view.overview.snapshotTick
-                    onScreen: mini.real.x + mini.real.w > 0 && mini.real.x < view.width
+                    onScreen: !view.awayHeld[tileItem.workspace.id]
+                      && mini.real.x + mini.real.w > 0 && mini.real.x < view.width
                       && mini.real.y + mini.real.h > 0 && mini.real.y < view.height
                     windowSize: Qt.size(mini.real.w, mini.real.h)
                   }

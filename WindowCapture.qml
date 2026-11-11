@@ -26,7 +26,13 @@ import Quickshell.Wayland
 // Captures also arrive opaque, so a translucent terminal comes out flat, and
 // Hyprland's opacity on a whole window is left out. With `glass` on (a
 // terminal) or `windowAlpha` under 1, shaders/terminal-glass.frag puts the
-// blurred wallpaper that was behind it back through.
+// blurred wallpaper that was behind it back through. The same pass rounds
+// the corners (`cornerRadius`), so a picture costs one layer at most.
+//
+// That layer is kept at a size that does not follow the motion (`layerSize`,
+// set by the thumbnail, which scales it instead), and the wallpaper is read
+// from the backdrop's own layer by coordinates: moving a picture re-renders
+// nothing, only a new frame from the window does.
 Item {
   id: capture
 
@@ -51,6 +57,20 @@ Item {
   property real glassAlpha: 1
   // Hyprland's opacity for the whole window, which a capture leaves out.
   property real windowAlpha: 1
+
+  // Rounded corners, in the logical pixels the picture is shown at
+  // (`shownSize`, which a scale transform above can make differ from this
+  // item's own size).
+  property real cornerRadius: 0
+  property size shownSize: Qt.size(capture.width, capture.height)
+  // The device pixels per logical pixel, and the layer's texture size; an
+  // empty size is the item's own.
+  property real pixelRatio: 1
+  property size layerSize: Qt.size(0, 0)
+  // No live frames for now (the overview is still moving): a stream of them
+  // re-renders the layer and has Hyprland render the window twice, in the
+  // frames the motion needs. Stills (captureFrame) still land.
+  property bool holdLive: false
 
   // Off for one turn of the event loop: the view is destroyed and made anew.
   property bool restarting: false
@@ -103,7 +123,7 @@ Item {
       active: !capture.restarting
       sourceComponent: ScreencopyView {
         captureSource: capture.source
-        live: capture.active && !capture.paused && !!captureSource && hasContent && capture.stayLive
+        live: capture.active && !capture.paused && !capture.holdLive && !!captureSource && hasContent && capture.stayLive
         onHasContentChanged: capture.contentChanged(hasContent)
       }
     }
@@ -116,6 +136,8 @@ Item {
     anchors.fill: parent
     visible: !!capture.mirrorOf
     sourceItem: capture.mirrorOf ? capture.mirrorOf.picture : null
+    // At the tile's size, not the window's.
+    textureSize: Qt.size(Math.ceil(width * capture.pixelRatio), Math.ceil(height * capture.pixelRatio))
   }
   // The recording ended (a refused capture); restart it when it can work.
   // Told by the picture going: ScreencopyView never emits its `stopped`.
@@ -234,8 +256,10 @@ Item {
       return
     }
     if (capture.ended && capture.canRestart) restartWait.start()
-    // A still kept from an earlier opening refreshes on the next.
-    else if (capture.hasContent && !capture.stayLive) capture.captureFrame()
+    // A still kept from an earlier opening refreshes on the next, if
+    // Hyprland can capture it: one off screen would refuse, and the refusal
+    // would cost the still.
+    else if (capture.hasContent && !capture.stayLive && capture.onScreen) capture.captureFrame()
   }
 
   Timer {
@@ -269,23 +293,30 @@ Item {
   readonly property bool glassOn: (capture.keyGlassOn || capture.windowAlpha < 0.999)
     && !!capture.backdrop && capture.backdrop.visible && capture.hasPicture
 
-  // Only a texture for the shader, never drawn itself.
-  ShaderEffectSource {
-    id: wallpaperPiece
-    visible: false
-    live: capture.glassOn
-    sourceItem: capture.glassOn ? capture.backdrop : null
-    sourceRect: capture.backdropRect
+  // backdropRect in the backdrop texture's 0..1.
+  readonly property rect backdropUv: {
+    var b = capture.backdrop
+    var w = b ? b.width : 0, h = b ? b.height : 0
+    if (!(w > 0) || !(h > 0)) return Qt.rect(0, 0, 1, 1)
+    var r = capture.backdropRect
+    return Qt.rect(r.x / w, r.y / h, r.width / w, r.height / h)
   }
 
-  layer.enabled: capture.glassOn
+  layer.enabled: capture.glassOn || capture.cornerRadius > 0
+  layer.textureSize: capture.layerSize
   layer.effect: ShaderEffect {
-    property var backdrop: wallpaperPiece
+    // The backdrop's layer itself; sampled only with the glass on.
+    property var backdrop: capture.backdrop
     property color background: capture.glassBackground
     property real alpha: capture.glassAlpha
     property real tolerance: 0.035
     property real keyGlass: capture.keyGlassOn ? 1 : 0
     property real windowAlpha: capture.windowAlpha
+    property real glass: capture.glassOn ? 1 : 0
+    property rect backdropRect: capture.backdropUv
+    property size size: capture.shownSize
+    property real radius: capture.cornerRadius
+    property real pixel: 1 / Math.max(0.25, capture.pixelRatio)
     fragmentShader: Qt.resolvedUrl("shaders/terminal-glass.frag.qsb")
   }
 }

@@ -17,6 +17,17 @@ Non-negotiables:
   rate; opening must feel instant (no process start on the hot path).
 - **Keyboard-driven too.** Everything the mouse does has a key.
 
+## Keeping it smooth with many windows
+
+Per frame of the motion, a window may only change numbers: positions,
+scales, uniforms. Anything that sizes a layer or `ShaderEffectSource` by the
+moving thumbnail, or points one at a moving `sourceRect`, re-renders an
+offscreen texture per window per frame (that is what `ClippingRectangle`
+does: two of them; don't use it on thumbnails). Window lists and the spread
+are worked out once per turn of the event loop (`Overview.relayout`), not as
+bindings over every toplevel's `lastIpcObject`: a refresh changes each of
+those in turn.
+
 ## Ground truth — read it, don't guess
 
 | What | Path |
@@ -46,7 +57,10 @@ Non-negotiables:
   (`hl.get_active_workspace`) that its workspace is still on screen: if the
   user switched away (SUPER+number, a swipe), nothing scrolls or refocuses
   then — the way back waits in `_G.omaview_pending` and is taken when they
-  return. The follow-up focus after a choice is likewise skipped once the
+  return. Until then its tile shows the windows where they were before the
+  pass (`awayHeld`), with the spread's last pictures of them: hidden
+  thumbnails keep their capture attached (never asked for a frame) for that.
+  The follow-up focus after a choice is likewise skipped once the
   user has moved on, or has the overview open again. A focus command moves
   the pointer to the window's middle (`cursor:no_warps` is off): focuses the
   overview issues on its own (putting focus back) save and restore the
@@ -55,6 +69,9 @@ Non-negotiables:
   workspace's screen as it looks, and the current workspace's tile mirrors
   the spread's pictures instead of capturing again.
 - `Thumbnail.qml` — one per toplevel, hidden when not on this workspace.
+  Its picture is drawn at the slot's size and scaled (`pane`, a `Scale`
+  transform) to wherever the glide has it, so its layer keeps one texture
+  through the motion. A hidden one reads constants, not the reveal clock.
 - `WindowCapture.qml` — `ScreencopyView` that grabs a still first, then goes
   live, and keeps its last frame between openings. A refused capture ends the
   recording and drops the view's picture (`ScreencopyView.stopped` is never
@@ -63,7 +80,9 @@ Non-negotiables:
   into a capture only while it overlaps its monitor, so a window scrolled
   fully off screen (scrolling layout) gives no picture; it shows its last
   frame, or its app icon.
-- `shaders/terminal-glass.frag` — captures arrive opaque, losing two kinds
+- `shaders/terminal-glass.frag` — the one pass a picture gets: rounded
+  corners, and the glass. It reads the wallpaper from the backdrop's own
+  layer by coordinates (`backdropRect`), never through a copy. Captures arrive opaque, losing two kinds
   of see-through, which this puts back over `windowGlass` (Overview.qml), the
   wallpaper as Hyprland's blur leaves it: radius from `blur:size` and
   `blur:passes`, fitted to screenshots of real windows, and `blur:brightness`.

@@ -1,7 +1,9 @@
 #version 440
 
-// Puts a translucent window's glass back into its capture. Captures arrive
-// opaque, which loses two kinds of see-through:
+// Everything a window's picture needs, in the one pass its layer already
+// costs: its rounded corners, and the glass a capture loses.
+//
+// Captures arrive opaque, which loses two kinds of see-through:
 //
 //  - A terminal's own background opacity: the background comes out as the
 //    theme background at the terminal's opacity over black, a flat colour
@@ -13,6 +15,10 @@
 //  - Hyprland's opacity on the whole window (a window rule, such as the one
 //    Omarchy gives the file manager): everything, text included, is blended
 //    over the wallpaper at `windowAlpha`.
+//
+// The wallpaper is read straight from the backdrop's own layer, at
+// `backdropRect` (the part behind the window, in that texture's 0..1): a
+// moving window only changes the numbers, never makes a copy.
 
 layout(location = 0) in vec2 qt_TexCoord0;
 layout(location = 0) out vec4 fragColor;
@@ -25,6 +31,11 @@ layout(std140, binding = 0) uniform buf {
     float tolerance;    // how far from the key colour still counts as background
     float keyGlass;     // 1 for a terminal's own see-through background
     float windowAlpha;  // Hyprland's opacity for the whole window
+    float glass;        // 1 when the wallpaper shows through at all
+    vec4 backdropRect;  // the part of the backdrop behind the window, 0..1
+    vec2 size;          // the size the picture is shown at, logical pixels
+    float radius;       // its corner radius, logical pixels
+    float pixel;        // one device pixel, in logical pixels
 };
 
 layout(binding = 1) uniform sampler2D source;
@@ -32,14 +43,26 @@ layout(binding = 2) uniform sampler2D backdrop;
 
 void main() {
     vec4 c = texture(source, qt_TexCoord0);
-    vec3 wall = texture(backdrop, qt_TexCoord0).rgb;
-    vec3 base = c.rgb;
-    if (keyGlass > 0.5) {
-        vec3 key = background.rgb * alpha;
-        vec3 glass = background.rgb * alpha + wall * (1.0 - alpha);
-        float onKey = 1.0 - smoothstep(tolerance * 0.5, tolerance, distance(c.rgb, key));
-        float onBlack = 1.0 - smoothstep(tolerance * 0.5, tolerance, length(c.rgb));
-        base = mix(c.rgb, glass, max(onKey, onBlack));
+    vec4 color = c;
+    if (glass > 0.5) {
+        vec3 wall = texture(backdrop, backdropRect.xy + qt_TexCoord0 * backdropRect.zw).rgb;
+        vec3 base = c.rgb;
+        if (keyGlass > 0.5) {
+            vec3 key = background.rgb * alpha;
+            vec3 tint = background.rgb * alpha + wall * (1.0 - alpha);
+            float onKey = 1.0 - smoothstep(tolerance * 0.5, tolerance, distance(c.rgb, key));
+            float onBlack = 1.0 - smoothstep(tolerance * 0.5, tolerance, length(c.rgb));
+            base = mix(c.rgb, tint, max(onKey, onBlack));
+        }
+        color = vec4(mix(wall, base, windowAlpha), 1.0);
     }
-    fragColor = vec4(mix(wall, base, windowAlpha), 1.0) * qt_Opacity;
+    float mask = 1.0;
+    if (radius > 0.0) {
+        vec2 half_ = size * 0.5;
+        float r = min(radius, min(half_.x, half_.y));
+        vec2 q = abs(qt_TexCoord0 * size - half_) - (half_ - vec2(r));
+        float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+        mask = clamp(0.5 - d / max(pixel, 0.0001), 0.0, 1.0);
+    }
+    fragColor = color * (mask * qt_Opacity);
 }

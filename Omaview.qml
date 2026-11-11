@@ -33,6 +33,9 @@ Item {
   // 0 = every thumbnail sits exactly over its real window, 1 = spread out.
   // One clock for every screen, so all of them open and close together.
   property real reveal: 0
+  // Fully open and still. Worked out once here, not by every thumbnail on
+  // every frame.
+  readonly property bool settled: root.opened && root.reveal >= 1
 
   // How the next close looks. "glide" flies the thumbnails back onto their
   // windows; "fade" is for a close that switched workspace, where the
@@ -172,6 +175,24 @@ Item {
         root.glassBrightness = Math.max(0, Math.min(1, values[2]))
       }
     }
+  }
+
+  // A window's app, by its id. Every thumbnail looks again each time
+  // Hyprland is asked where the windows are, as at each opening; the search
+  // through every desktop entry is done once per app instead.
+  property var appEntries: ({})
+
+  function appEntryFor(id) {
+    if (id in root.appEntries) return root.appEntries[id]
+    var entry = DesktopEntries.heuristicLookup(id)
+    root.appEntries[id] = entry
+    return entry
+  }
+
+  // Apps installed or removed: look again.
+  Connections {
+    target: DesktopEntries.applications
+    function onValuesChanged() { root.appEntries = ({}) }
   }
 
   // Terminals are what the theme makes see-through; Hyprland tags them.
@@ -638,12 +659,10 @@ Item {
     root.activating = toplevel
     root.focusSent = false
     root.keyboardReleased = true
-    // A photo pass mid-way has the layout scrolled: put it back first, and
-    // give that a few frames more to land.
-    var midPass = root.passingCount > 0
-    if (midPass) root.stopPasses(false)
-    focusAfterRelease.interval = midPass ? 90 : 34
-    activateTimeout.interval = midPass ? 260 : 200
+    // A photo pass mid-way has the layout scrolled: put it back first. The
+    // scroll back goes out first and Hyprland takes commands in order, so
+    // the focus needs no longer wait than usual.
+    if (root.passingCount > 0) root.stopPasses(false)
     focusAfterRelease.restart()
     activateTimeout.restart()
   }
@@ -676,8 +695,40 @@ Item {
       if (!root.activating) return
       root.focusWindow(root.activating)
       root.focusSent = true
-      Hyprland.refreshToplevels()
+      focusAsk.restart()
     }
+  }
+
+  // Where the windows are once the focus has landed. Asked at the moment the
+  // focus went out, the answer could come back from before it, and nothing
+  // then said the windows had moved until the timeout. So ask when Hyprland
+  // reports the focus, or a little later if it reports none (the window had
+  // it already), and again a moment after.
+  Timer {
+    id: focusAsk
+    interval: 40
+    onTriggered: Hyprland.refreshToplevels()
+  }
+
+  Connections {
+    target: Hyprland
+    enabled: !!root.activating && root.focusSent
+    function onRawEvent(event) {
+      if (!event || String(event.name) !== "activewindowv2") return
+      Hyprland.refreshToplevels()
+      // Once more a moment later: now and then that answer changes nothing
+      // that is seen, and the overview would wait out the timeout.
+      focusAsk.restart()
+      focusLanded.restart()
+    }
+  }
+
+  // Both answers are in well before this; one that changed nothing means
+  // nothing moved, and there is no reason to wait out the timeout.
+  Timer {
+    id: focusLanded
+    interval: 70
+    onTriggered: root.finishActivate()
   }
 
   function finishActivate() {
@@ -685,6 +736,8 @@ Item {
     root.activating = null
     activateTimeout.stop()
     focusAfterRelease.stop()
+    focusAsk.stop()
+    focusLanded.stop()
     root.releaseHolds()
     root.dismiss("glide")
   }
@@ -694,6 +747,15 @@ Item {
   Connections {
     target: root.activating
     function onLastIpcObjectChanged() { if (root.focusSent) root.finishActivate() }
+  }
+
+  // Or as fresh objects on any window (Overview.relayout runs once they are
+  // all in). The chosen one's own can stay as it was, as when a photo pass
+  // had already scrolled it into view: waiting for that held the overview
+  // still for the whole timeout, a quarter second after the click. Should a
+  // later answer move the windows again, the closing thumbnails ease there.
+  function windowsReported() {
+    if (root.activating && root.focusSent) Qt.callLater(root.finishActivate)
   }
 
   // Should the answer not come, go anyway.

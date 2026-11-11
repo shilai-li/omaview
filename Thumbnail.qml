@@ -18,12 +18,25 @@ Item {
   property var overview
 
   readonly property var toplevel: thumb.modelData
-  readonly property int slotIndex: thumb.host.windows.indexOf(thumb.toplevel)
-  readonly property bool present: thumb.slotIndex >= 0
-  readonly property var real: thumb.present ? thumb.host.realRects[thumb.slotIndex] : null
-  readonly property var slot: thumb.present ? thumb.host.slots[thumb.slotIndex] : null
+  // Index, real place and slot read together from the one layout the screen
+  // works out (Overview.qml `layout`): read one by one, a thumbnail could
+  // see a new list with an old index for a moment, and lose its slot.
+  readonly property var entry: {
+    var l = thumb.host.layout
+    var i = l.windows.indexOf(thumb.toplevel)
+    return i < 0 ? null : { index: i, real: l.rects[i], slot: l.slots[i] }
+  }
+  readonly property int slotIndex: thumb.entry ? thumb.entry.index : -1
+  readonly property bool present: !!thumb.entry
+  readonly property var real: thumb.entry ? thumb.entry.real : null
+  readonly property var slot: thumb.entry ? thumb.entry.slot : null
   readonly property bool selected: thumb.present && thumb.host.cursorIndex === thumb.slotIndex
-  readonly property bool settled: thumb.overview.opened && thumb.overview.reveal >= 1
+  readonly property bool settled: thumb.overview.settled
+  // The screen's motion, for a thumbnail on show. One whose window is on
+  // another workspace reads a constant instead, so the dozens of them do no
+  // work on each frame of the opening.
+  readonly property real travel: thumb.present ? thumb.host.travel : 1
+  readonly property real thumbFade: thumb.present ? thumb.host.thumbFade : 1
   // The dragged window is over this one: let go and they trade places.
   readonly property bool swapping: !!thumb.host.swapTarget && thumb.host.swapTarget === thumb.toplevel
 
@@ -174,6 +187,10 @@ Item {
   // answer lands while the thumbnails are already gliding home; easing to it
   // keeps the glide from changing course in one frame.
   readonly property bool hasReal: !!thumb.real && thumb.real.w > 0 && thumb.real.h > 0
+  readonly property bool sized: {
+    var size = ((thumb.toplevel && thumb.toplevel.lastIpcObject) || {}).size
+    return !!size && size[0] > 0 && size[1] > 0
+  }
   property real realX: thumb.real ? thumb.real.x : 0
   property real realY: thumb.real ? thumb.real.y : 0
   property real realW: thumb.real ? thumb.real.w : 0
@@ -192,10 +209,10 @@ Item {
       || thumb.real.y + thumb.real.h <= 0 || thumb.real.y >= thumb.host.height)
   readonly property bool glides: thumb.hasReal && !thumb.offscreen
 
-  readonly property real baseX: thumb.glides ? Layout.lerp(thumb.realX, thumb.slotX, thumb.host.travel) : thumb.slotX
-  readonly property real baseY: thumb.glides ? Layout.lerp(thumb.realY, thumb.slotY, thumb.host.travel) : thumb.slotY
-  readonly property real baseW: thumb.glides ? Layout.lerp(thumb.realW, thumb.slotW, thumb.host.travel) : thumb.slotW
-  readonly property real baseH: thumb.glides ? Layout.lerp(thumb.realH, thumb.slotH, thumb.host.travel) : thumb.slotH
+  readonly property real baseX: thumb.glides ? Layout.lerp(thumb.realX, thumb.slotX, thumb.travel) : thumb.slotX
+  readonly property real baseY: thumb.glides ? Layout.lerp(thumb.realY, thumb.slotY, thumb.travel) : thumb.slotY
+  readonly property real baseW: thumb.glides ? Layout.lerp(thumb.realW, thumb.slotW, thumb.travel) : thumb.slotW
+  readonly property real baseH: thumb.glides ? Layout.lerp(thumb.realH, thumb.slotH, thumb.travel) : thumb.slotH
   readonly property real heldW: thumb.slotW * thumb.dragScale
   readonly property real heldH: thumb.slotH * thumb.dragScale
 
@@ -205,13 +222,13 @@ Item {
   height: Layout.lerp(thumb.baseH, thumb.heldH, thumb.dragBlend)
   rotation: -2 * thumb.dragBlend
   // Never from 0: a fading thumbnail starts a little small, as entrances do.
-  scale: (thumb.glides ? 1 : Layout.lerp(0.94, 1, thumb.host.travel)) * Layout.lerp(0.94, 1, thumb.entered)
+  scale: (thumb.glides ? 1 : Layout.lerp(0.94, 1, thumb.travel)) * Layout.lerp(0.94, 1, thumb.entered)
   // A gliding thumbnail hands over to its real window during the last
   // quarter of the way home (and takes over during the first quarter out):
   // a capture never looks quite like the window as Hyprland draws it (its
   // blur, its opacity), and switching in one frame showed as a pop.
-  opacity: (thumb.glides ? Layout.clamp01(thumb.host.travel * 4) : thumb.host.travel)
-    * thumb.host.thumbFade * thumb.entered
+  opacity: (thumb.glides ? Layout.clamp01(thumb.travel * 4) : thumb.travel)
+    * thumb.thumbFade * thumb.entered
     * (thumb.sent ? 0 : 1) * (thumb.host.dragged && !thumb.dragging && !thumb.swapping ? 0.55 : 1)
   // Eases the dim of a drag and the fade of a window sent away; the open and
   // close already move frame by frame on the reveal clock.
@@ -229,7 +246,7 @@ Item {
     offset.y: Style.space(14)
     spread: 0
     color: thumb.overview.shadow
-    opacity: thumb.host.travel
+    opacity: thumb.travel
   }
 
   // The hover / cursor ring, outside the window with a gap.
@@ -241,27 +258,51 @@ Item {
     color: "transparent"
     border.width: Style.space(3)
     border.color: thumb.overview.accent
-    visible: (thumb.selected && thumb.host.travel > 0.5 && !thumb.host.dragged) || thumb.dragging || thumb.swapping
+    visible: (thumb.selected && thumb.travel > 0.5 && !thumb.host.dragged) || thumb.dragging || thumb.swapping
   }
 
-  ClippingRectangle {
-    id: body
+  readonly property real cornerRadius: thumb.overview.windowRadius * Layout.clamp01(thumb.travel * 2)
+
+  // Under the picture: what shows of a window with none yet.
+  Rectangle {
     anchors.fill: parent
-    radius: thumb.overview.windowRadius * Layout.clamp01(thumb.host.travel * 2)
+    radius: thumb.cornerRadius
     color: thumb.overview.windowFill
-    border.width: thumb.selected || thumb.dragging ? 0 : 1
-    border.color: thumb.overview.hairline
+  }
+
+  // The picture is drawn at its slot's size and scaled to wherever the
+  // thumbnail is on its way. Its layer (rounded corners, glass) then keeps
+  // one texture for the whole motion: sized by the moving thumbnail, it was
+  // made anew and redrawn for every window on every frame.
+  Item {
+    id: pane
+    width: Math.max(1, thumb.toW)
+    height: Math.max(1, thumb.toH)
+    transform: Scale {
+      xScale: thumb.width / pane.width
+      yScale: thumb.height / pane.height
+    }
 
     WindowCapture {
       id: capture
       anchors.fill: parent
-      source: thumb.present ? thumb.toplevel.wayland : null
+      // Never a window without a size: Hyprland reports one squeezed to
+      // nothing (a crowded dwindle layout) as 0 or less, and a capture of it
+      // is a buffer Wayland rejects, which takes the whole shell down.
+      // Kept on a window gone to another workspace, which keeps its last
+      // frame (nothing is asked of it there: it is not on screen, and not
+      // live): it is back at once on return, and a workspace left mid-pass
+      // shows it in its tile (Overview.qml awayHeld).
+      source: (thumb.present ? thumb.hasReal : thumb.sized) ? thumb.toplevel.wayland : null
       active: thumb.overview.mapped
       // Held while the overview photographs off-screen windows, and while it
       // closes (a choice may scroll the layout); a window off screen is never
       // captured live, only grabbed while scrolled into view.
       paused: thumb.host.passing || !thumb.overview.opened
-      stayLive: !thumb.offscreen
+      // Stills only while it opens: the motion is too quick to see a window
+      // change, and the frames are better spent on the motion.
+      holdLive: !thumb.settled
+      stayLive: thumb.present && !thumb.offscreen
       // The wallpaper from behind the thumbnail itself, at its own scale, so
       // the thumbnail is a pane of glass where it sits. At either end of the
       // glide it is over its real window, and that glass lines up.
@@ -274,41 +315,55 @@ Item {
       snapshotTick: thumb.overview.snapshotTick
       onScreen: thumb.hasReal && !thumb.offscreen
       windowSize: thumb.hasReal ? Qt.size(thumb.real.w, thumb.real.h) : Qt.size(0, 0)
+      cornerRadius: thumb.cornerRadius
+      shownSize: Qt.size(thumb.width, thumb.height)
+      pixelRatio: thumb.host.pixelRatio
+      layerSize: Qt.size(Math.ceil(pane.width * thumb.host.pixelRatio), Math.ceil(pane.height * thumb.host.pixelRatio))
+    }
+  }
+
+  // The hairline edge, where the ring is not.
+  Rectangle {
+    anchors.fill: parent
+    radius: thumb.cornerRadius
+    color: "transparent"
+    border.width: 1
+    border.color: thumb.overview.hairline
+    visible: !(thumb.selected || thumb.dragging)
+  }
+
+  // No picture yet (a window Hyprland will not capture while it is off
+  // screen): the app's icon and name, so it is still recognisable.
+  Column {
+    anchors.centerIn: parent
+    width: parent.width - Style.space(16)
+    spacing: Style.space(10)
+    visible: !capture.hasPicture
+
+    IconImage {
+      anchors.horizontalCenter: parent.horizontalCenter
+      readonly property int size: Math.min(Style.space(64), Math.round(thumb.height * 0.3))
+      implicitSize: size
+      visible: thumb.appIcon !== "" && size >= Style.space(16)
+      source: thumb.appIcon
     }
 
-    // No picture yet (a window Hyprland will not capture while it is off
-    // screen): the app's icon and name, so it is still recognisable.
-    Column {
-      anchors.centerIn: parent
-      width: parent.width - Style.space(16)
-      spacing: Style.space(10)
-      visible: !capture.hasPicture
-
-      IconImage {
-        anchors.horizontalCenter: parent.horizontalCenter
-        readonly property int size: Math.min(Style.space(64), Math.round(thumb.height * 0.3))
-        implicitSize: size
-        visible: thumb.appIcon !== "" && size >= Style.space(16)
-        source: thumb.appIcon
-      }
-
-      Text {
-        width: parent.width
-        horizontalAlignment: Text.AlignHCenter
-        elide: Text.ElideRight
-        textFormat: Text.PlainText
-        text: thumb.appName
-        color: thumb.overview.softText
-        font.family: thumb.overview.fontFamily
-        font.pixelSize: Style.font.subtitle
-      }
+    Text {
+      width: parent.width
+      horizontalAlignment: Text.AlignHCenter
+      elide: Text.ElideRight
+      textFormat: Text.PlainText
+      text: thumb.appName
+      color: thumb.overview.softText
+      font.family: thumb.overview.fontFamily
+      font.pixelSize: Style.font.subtitle
     }
   }
 
   readonly property var appEntry: {
     var ipc = (thumb.toplevel && thumb.toplevel.lastIpcObject) || {}
     var id = String((thumb.toplevel && thumb.toplevel.wayland && thumb.toplevel.wayland.appId) || ipc["class"] || "")
-    return id ? DesktopEntries.heuristicLookup(id) : null
+    return id ? thumb.overview.appEntryFor(id) : null
   }
   readonly property string appName: {
     if (thumb.appEntry && thumb.appEntry.name) return String(thumb.appEntry.name)
@@ -342,7 +397,7 @@ Item {
     font.family: thumb.overview.fontFamily
     font.pixelSize: Style.font.subtitle
     font.bold: thumb.selected
-    opacity: Layout.clamp01(thumb.host.travel * 2 - 1) * (1 - thumb.dragBlend)
+    opacity: Layout.clamp01(thumb.travel * 2 - 1) * (1 - thumb.dragBlend)
   }
 
   MouseArea {
